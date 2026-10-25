@@ -35,7 +35,7 @@ grep -q 'capabilities.*\[\]string{"ping"}' server/websocket.go || {
   exit 1
 }
 gofmt -w cmd server
-go test ./server ./cmd/flags
+go test -race ./server ./cmd/flags ./protocol/v2
 go build ./...
 
 echo 'Patch applies and the TCP-safe agent builds successfully.'

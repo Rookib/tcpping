@@ -237,10 +237,10 @@ index 234ae48..c6d05d0 100644
  			return err
 diff --git a/server/safe_tcp_ping.go b/server/safe_tcp_ping.go
 new file mode 100644
-index 0000000..13860ee
+index 0000000..e8d40e4
 --- /dev/null
 +++ b/server/safe_tcp_ping.go
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,339 @@
 +package server
 +
 +import (
@@ -252,6 +252,7 @@ index 0000000..13860ee
 +	"log"
 +	"net"
 +	"net/http"
++	"net/netip"
 +	"strconv"
 +	"strings"
 +	"sync"
@@ -351,6 +352,13 @@ index 0000000..13860ee
 +}
 +
 +func measureSafeTCP(target string) (time.Duration, error) {
++	return measureSafeTCPWithNetwork(target, net.LookupIP, net.DialTimeout)
++}
++
++// The production path always supplies net.LookupIP and net.DialTimeout. Keeping
++// the dependencies explicit lets policy tests prove no forbidden address is
++// dialed without performing DNS queries or making network connections.
++func measureSafeTCPWithNetwork(target string, lookupIP func(string) ([]net.IP, error), dialTimeout func(string, string, time.Duration) (net.Conn, error)) (time.Duration, error) {
 +	host, portText, err := net.SplitHostPort(strings.TrimSpace(target))
 +	if err != nil {
 +		return 0, errors.New("target must be an explicit host:port")
@@ -370,7 +378,7 @@ index 0000000..13860ee
 +		return 0, fmt.Errorf("port %d is not on the TCP probe allow-list", port)
 +	}
 +
-+	ips, err := net.LookupIP(host)
++	ips, err := lookupIP(host)
 +	if err != nil || len(ips) == 0 {
 +		return 0, errors.New("unable to resolve target host")
 +	}
@@ -392,7 +400,7 @@ index 0000000..13860ee
 +	// otherwise a later DNS answer could turn the task into an internal probe.
 +	address := net.JoinHostPort(ips[0].String(), strconv.Itoa(port))
 +	start := time.Now()
-+	conn, err := net.DialTimeout("tcp", address, timeout)
++	conn, err := dialTimeout("tcp", address, timeout)
 +	if err != nil {
 +		return 0, err
 +	}
@@ -455,8 +463,84 @@ index 0000000..13860ee
 +		case v4[0] >= 224: // multicast, reserved, and limited broadcast
 +			return false
 +		}
++		return true
 +	}
-+	return true
++
++	address, ok := netip.AddrFromSlice(ip)
++	if !ok || !safeTCPIPv6GlobalUnicast.Contains(address) {
++		// Includes NAT64, IPv4-compatible, discard-only, SRv6, local and
++		// currently unallocated address families. IPv4-mapped addresses were
++		// already normalized and checked by the IPv4 policy above.
++		return false
++	}
++	for _, prefix := range safeTCPIPv6SpecialPrefixes {
++		if prefix.Contains(address) {
++			return false
++		}
++	}
++	for _, prefix := range safeTCPIPv6AllocatedPrefixes {
++		if prefix.Contains(address) {
++			return true
++		}
++	}
++	return false
++}
++
++var safeTCPIPv6GlobalUnicast = netip.MustParsePrefix("2000::/3")
++
++// Conservative probe policy: reject every IANA special-purpose allocation,
++// including globally reachable anycast exceptions, transition mechanisms and
++// documentation. Most non-global ranges are already rejected above.
++// Source: https://www.iana.org/assignments/iana-ipv6-special-registry/
++// Registry updated 2025-10-09, reviewed 2026-10-26.
++var safeTCPIPv6SpecialPrefixes = []netip.Prefix{
++	netip.MustParsePrefix("2001::/23"),         // IETF assignments: Teredo, ORCHID, AMT, protocol anycasts, etc.
++	netip.MustParsePrefix("2001:db8::/32"),     // documentation
++	netip.MustParsePrefix("2002::/16"),         // 6to4: may embed a forbidden IPv4 address
++	netip.MustParsePrefix("2620:4f:8000::/48"), // AS112 special-purpose anycast
++	netip.MustParsePrefix("3fff::/20"),         // documentation
++}
++
++// Admit only the RIR allocations in IANA's global-unicast registry. Merely
++// being in 2000::/3 is insufficient: unlisted/reserved space fails closed.
++// Update this reviewed snapshot when IANA allocates additional RIR prefixes.
++// Source: https://www.iana.org/assignments/ipv6-unicast-address-assignments/
++// Registry updated 2025-10-10, reviewed 2026-10-26.
++var safeTCPIPv6AllocatedPrefixes = []netip.Prefix{
++	netip.MustParsePrefix("2001:200::/23"),
++	netip.MustParsePrefix("2001:400::/23"),
++	netip.MustParsePrefix("2001:600::/23"),
++	netip.MustParsePrefix("2001:800::/22"),
++	netip.MustParsePrefix("2001:c00::/23"),
++	netip.MustParsePrefix("2001:e00::/23"),
++	netip.MustParsePrefix("2001:1200::/23"),
++	netip.MustParsePrefix("2001:1400::/22"),
++	netip.MustParsePrefix("2001:1800::/23"),
++	netip.MustParsePrefix("2001:1a00::/23"),
++	netip.MustParsePrefix("2001:1c00::/22"),
++	netip.MustParsePrefix("2001:2000::/19"),
++	netip.MustParsePrefix("2001:4000::/23"),
++	netip.MustParsePrefix("2001:4200::/23"),
++	netip.MustParsePrefix("2001:4400::/23"),
++	netip.MustParsePrefix("2001:4600::/23"),
++	netip.MustParsePrefix("2001:4800::/23"),
++	netip.MustParsePrefix("2001:4a00::/23"),
++	netip.MustParsePrefix("2001:4c00::/23"),
++	netip.MustParsePrefix("2001:5000::/20"),
++	netip.MustParsePrefix("2001:8000::/19"),
++	netip.MustParsePrefix("2001:a000::/20"),
++	netip.MustParsePrefix("2001:b000::/20"),
++	netip.MustParsePrefix("2003::/18"),
++	netip.MustParsePrefix("2400::/12"),
++	netip.MustParsePrefix("2410::/12"),
++	netip.MustParsePrefix("2600::/12"),
++	netip.MustParsePrefix("2610::/23"),
++	netip.MustParsePrefix("2620::/23"),
++	netip.MustParsePrefix("2630::/12"),
++	netip.MustParsePrefix("2800::/12"),
++	netip.MustParsePrefix("2a00::/12"),
++	netip.MustParsePrefix("2a10::/12"),
++	netip.MustParsePrefix("2c00::/12"),
 +}
 +
 +func postSafeTCPPingResult(payload interface{}) error {
@@ -495,6 +579,244 @@ index 0000000..13860ee
 +		return fmt.Errorf("status %s: %s", resp.Status, strings.TrimSpace(string(data)))
 +	}
 +	return nil
++}
+diff --git a/server/safe_tcp_ping_test.go b/server/safe_tcp_ping_test.go
+new file mode 100644
+index 0000000..b5e63da
+--- /dev/null
++++ b/server/safe_tcp_ping_test.go
+@@ -0,0 +1,232 @@
++package server
++
++import (
++	"net"
++	"testing"
++	"time"
++)
++
++func preserveSafeTCPPolicy(t *testing.T) {
++	t.Helper()
++	old := *flags
++	safeTCPTaskWindow.Lock()
++	hits := append([]time.Time(nil), safeTCPTaskWindow.accepted...)
++	safeTCPTaskWindow.accepted = nil
++	safeTCPTaskWindow.Unlock()
++	t.Cleanup(func() {
++		*flags = old
++		safeTCPTaskWindow.Lock()
++		safeTCPTaskWindow.accepted = hits
++		safeTCPTaskWindow.Unlock()
++	})
++	flags.SafeTCPAllowHosts = "*.ip.zstaticcdn.com,1.1.1.1"
++	flags.SafeTCPAllowPorts = "80,443"
++	flags.SafeTCPTimeoutSeconds = 3
++	flags.SafeTCPMaxTasksPerMinute = 2
++}
++
++func TestSafeTCPHostAndPortAllowlist(t *testing.T) {
++	preserveSafeTCPPolicy(t)
++	for _, h := range []string{"zj-cm-v4.ip.zstaticcdn.com", "ZJ-CM-V4.IP.ZSTATICCDN.COM.", "1.1.1.1"} {
++		if !safeTCPHostAllowed(h) {
++			t.Errorf("approved host rejected: %s", h)
++		}
++	}
++	for _, h := range []string{"ip.zstaticcdn.com", "ip.zstaticcdn.com.evil.invalid", "evilip.zstaticcdn.com", "localhost", "127.0.0.1", "8.8.8.8"} {
++		if safeTCPHostAllowed(h) {
++			t.Errorf("unapproved host accepted: %s", h)
++		}
++	}
++	for _, p := range []int{0, 22, 8080, 65536} {
++		if safeTCPPortAllowed(p) {
++			t.Errorf("unapproved port accepted: %d", p)
++		}
++	}
++	for _, p := range []int{80, 443} {
++		if !safeTCPPortAllowed(p) {
++			t.Errorf("approved port rejected: %d", p)
++		}
++	}
++	for _, target := range []string{"zj-cm-v4.ip.zstaticcdn.com", "localhost:80", "zj-cm-v4.ip.zstaticcdn.com:22", "zj-cm-v4.ip.zstaticcdn.com:no"} {
++		if _, err := measureSafeTCPWithNetwork(target, rejectLookup(t), rejectDial(t)); err == nil {
++			t.Errorf("invalid target accepted: %s", target)
++		}
++	}
++}
++
++func TestSafeTCPPrivateAndReservedAddresses(t *testing.T) {
++	for _, s := range []string{"0.1.2.3", "10.0.0.1", "100.64.0.1", "100.127.255.254", "127.0.0.1", "169.254.169.254", "172.16.0.1", "192.168.1.1", "192.0.2.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "255.255.255.255", "::", "::1", "fc00::1", "fe80::1", "ff02::1", "::ffff:127.0.0.1"} {
++		if safeTCPPublicIP(net.ParseIP(s)) {
++			t.Errorf("forbidden address accepted: %s", s)
++		}
++	}
++	for _, s := range []string{"1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"} {
++		if !safeTCPPublicIP(net.ParseIP(s)) {
++			t.Errorf("public address rejected: %s", s)
++		}
++	}
++}
++
++func TestSafeTCPDNSAnswersArePinned(t *testing.T) {
++	preserveSafeTCPPolicy(t)
++	calls := 0
++	lookup := func(host string) ([]net.IP, error) {
++		calls++
++		if host != "zj-cm-v4.ip.zstaticcdn.com" {
++			t.Fatalf("unexpected resolver input %q", host)
++		}
++		return []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("8.8.8.8")}, nil
++	}
++	dialed := false
++	dial := func(network, address string, timeout time.Duration) (net.Conn, error) {
++		dialed = true
++		if network != "tcp" || address != "1.1.1.1:443" || timeout != 3*time.Second {
++			t.Fatalf("dial not pinned: %s %s %s", network, address, timeout)
++		}
++		c, peer := net.Pipe()
++		peer.Close()
++		return c, nil
++	}
++	if _, err := measureSafeTCPWithNetwork("zj-cm-v4.ip.zstaticcdn.com:443", lookup, dial); err != nil {
++		t.Fatal(err)
++	}
++	if calls != 1 || !dialed {
++		t.Fatalf("resolver calls=%d dialed=%v", calls, dialed)
++	}
++}
++
++func TestSafeTCPMixedDNSAnswerIsRejected(t *testing.T) {
++	preserveSafeTCPPolicy(t)
++	lookup := func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("127.0.0.1")}, nil }
++	if _, err := measureSafeTCPWithNetwork("zj-cm-v4.ip.zstaticcdn.com:443", lookup, rejectDial(t)); err == nil {
++		t.Fatal("mixed DNS answer accepted")
++	}
++}
++
++func TestSafeTCPRateLimitAndExpiry(t *testing.T) {
++	preserveSafeTCPPolicy(t)
++	safeTCPTaskWindow.accepted = []time.Time{time.Now().Add(-2 * time.Minute)}
++	if !allowSafeTCPTask() || !allowSafeTCPTask() || allowSafeTCPTask() {
++		t.Fatal("sliding-window limit failed")
++	}
++	if len(safeTCPTaskWindow.accepted) != 2 {
++		t.Fatal("expired tasks retained")
++	}
++}
++
++func TestSafeTCPUnknownControlMethodsAreIgnored(t *testing.T) {
++	preserveSafeTCPPolicy(t)
++	for _, method := range []string{"agent.exec", "agent.terminal.request", "agent.file", "agent.switchVersion", "agent.startupConfig"} {
++		if !processV2Event(nil, method, map[string]any{"version": "latest", "command": "id"}, "") {
++			t.Fatalf("unsupported method not acknowledged: %s", method)
++		}
++	}
++}
++
++func TestSafeTCPSSHLoginParser(t *testing.T) {
++	for _, line := range []string{"Accepted publickey for root from 203.0.113.2 port 22 ssh2", "Accepted password for user from 2001:db8::1 port 1024 ssh2"} {
++		if _, ok := parseAcceptedSSHLogin(line); !ok {
++			t.Errorf("valid successful login rejected: %s", line)
++		}
++	}
++	for _, line := range []string{"Accepted password for user from invalid port 22 ssh2", "Accepted password for user from 203.0.113.2 port 99999 ssh2", "Failed password for user from 203.0.113.2 port 22 ssh2"} {
++		if _, ok := parseAcceptedSSHLogin(line); ok {
++			t.Errorf("invalid success event accepted: %s", line)
++		}
++	}
++}
++
++func TestSafeTCPVnstatSkipsVirtualInterfaces(t *testing.T) {
++	interfaces := []vnstatInterface{{Name: "docker0", Traffic: vnstatTraffic{Total: vnstatCounter{Rx: 9000}}}, {Name: "eth0", Traffic: vnstatTraffic{Total: vnstatCounter{Rx: 100}}}}
++	iface, ok := selectLargestVnstatInterface(interfaces, true)
++	if !ok || iface.Name != "eth0" {
++		t.Fatalf("virtual interface selected: %#v", iface)
++	}
++}
++
++func rejectLookup(t *testing.T) func(string) ([]net.IP, error) {
++	t.Helper()
++	return func(string) ([]net.IP, error) { t.Fatal("unexpected DNS lookup"); return nil, nil }
++}
++
++func rejectDial(t *testing.T) func(string, string, time.Duration) (net.Conn, error) {
++	t.Helper()
++	return func(string, string, time.Duration) (net.Conn, error) {
++		t.Fatal("forbidden network dial")
++		return nil, nil
++	}
++}
++
++func TestSafeTCPIPv6SpecialAndUnallocatedPrefixes(t *testing.T) {
++	for _, address := range []string{
++		"::192.168.1.1", "64:ff9b::7f00:1", "64:ff9b::808:808",
++		"64:ff9b:1::a00:1", "100::1", "100:0:0:1::1",
++		"2001::1", "2001:1::1", "2001:2::1", "2001:3::1",
++		"2001:4:112::1", "2001:10::1", "2001:20::1", "2001:30::1",
++		"2001:1ff:ffff::1", "2001:db8::1", "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff",
++		"2002:7f00:1::1", "2002:808:808::1", "2620:4f:8000::1",
++		"3fff::1", "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff", "5f00::1",
++		"2000::1", "2001:1000::1", "2003:4000::1", "2420::1",
++		"2d00::1", "3000::1", "3ffe::1", "4000::1", "fec0::1",
++	} {
++		t.Run(address, func(t *testing.T) {
++			if safeTCPPublicIP(net.ParseIP(address)) {
++				t.Fatal("special or unallocated IPv6 address accepted")
++			}
++		})
++	}
++	for _, address := range []string{
++		"2001:200::1", "2001:4860:4860::8888", "2001:db7::1", "2001:db9::1",
++		"2003:3fff::1", "2408::1", "2410::1", "241f::1",
++		"2606:4700:4700::1111", "2620:4f:7fff::1", "2620:4f:8001::1",
++		"2800::1", "2a00::1", "2a10::1", "2c00::1", "::ffff:8.8.8.8",
++	} {
++		t.Run(address, func(t *testing.T) {
++			if !safeTCPPublicIP(net.ParseIP(address)) {
++				t.Fatal("allocated ordinary public address rejected")
++			}
++		})
++	}
++	if safeTCPPublicIP(nil) || safeTCPPublicIP(net.IP{1, 2}) {
++		t.Fatal("invalid IP accepted")
++	}
++}
++
++func TestSafeTCPDNSRejectsSpecialIPv6WithoutDial(t *testing.T) {
++	preserveSafeTCPPolicy(t)
++	for _, address := range []string{"2001:db8::1", "64:ff9b::7f00:1", "2001::1", "2002:7f00:1::1", "3fff::1", "2420::1"} {
++		t.Run(address, func(t *testing.T) {
++			calls := 0
++			lookup := func(string) ([]net.IP, error) {
++				calls++
++				return []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP(address)}, nil
++			}
++			if _, err := measureSafeTCPWithNetwork("zj-cm-v4.ip.zstaticcdn.com:443", lookup, rejectDial(t)); err == nil {
++				t.Fatal("mixed DNS result accepted")
++			}
++			if calls != 1 {
++				t.Fatalf("lookup count = %d", calls)
++			}
++		})
++	}
++}
++
++func TestSafeTCPDNSPinsOrdinaryIPv6(t *testing.T) {
++	preserveSafeTCPPolicy(t)
++	calls := 0
++	lookup := func(string) ([]net.IP, error) { calls++; return []net.IP{net.ParseIP("2606:4700:4700::1111")}, nil }
++	dial := func(network, address string, timeout time.Duration) (net.Conn, error) {
++		if network != "tcp" || address != "[2606:4700:4700::1111]:443" || timeout != 3*time.Second {
++			t.Fatalf("IPv6 dial not pinned: %s %s %s", network, address, timeout)
++		}
++		c, peer := net.Pipe()
++		peer.Close()
++		return c, nil
++	}
++	if _, err := measureSafeTCPWithNetwork("zj-cm-v4.ip.zstaticcdn.com:443", lookup, dial); err != nil {
++		t.Fatal(err)
++	}
++	if calls != 1 {
++		t.Fatalf("lookup count = %d", calls)
++	}
 +}
 diff --git a/server/security_action_sync.go b/server/security_action_sync.go
 new file mode 100644

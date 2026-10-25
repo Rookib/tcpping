@@ -15,16 +15,26 @@ The agent accepts an `agent.ping` task only when all of these conditions hold:
 - The destination port matches `--safe-tcp-allow-ports`.
 - DNS results are resolved once and pinned for the connection.
 - Loopback, RFC1918, CGNAT, link-local, multicast, unspecified, benchmark, documentation, and other reserved IPv4 ranges are rejected.
+- IPv6 must be within a reviewed IANA RIR global-unicast allocation; special-purpose, translation/tunnel, documentation, and unallocated prefixes are rejected. IPv4-mapped addresses use the same IPv4 checks.
 - The agent has not exceeded `--safe-tcp-max-tasks-per-minute`.
 
 CI refuses to build if a server-side exec/terminal handler, unexpected
 `os/exec` use, or a capability broader than constrained TCP ping appears in the
-patched agent. The only allowed command execution paths are the fixed local
-`vnstat --json` reader used for optional traffic accounting and the fixed
-read-only `journalctl -f -n 0 -o cat` SSH-login log fallback; panel input never
-reaches either command.
+patched agent. Allowed command execution is limited to the fixed local `vnstat --json`
+reader, fixed read-only `journalctl` invocations for successful and failed SSH
+logins, and fixed `nft` operations for the SSH guard. Firewall operations accept
+only a parsed single IP address and a numeric duration; no panel-supplied shell
+command, executable, table name, chain name, or argument list is accepted.
 Install and upgrade scripts verify the downloaded binary against the release
 `SHA256SUMS` before replacing the running root-owned binary.
+
+The IPv6 allocation snapshot was reviewed on 2026-10-26 against IANA's
+[global-unicast allocations](https://www.iana.org/assignments/ipv6-unicast-address-assignments/)
+and [special-purpose registry](https://www.iana.org/assignments/iana-ipv6-special-registry/).
+NAT64, Teredo, 6to4, protocol anycast exceptions, and newly allocated prefixes
+not yet reviewed are intentionally unsupported. A mixed DNS answer containing
+any forbidden address rejects the entire probe before dialing. Ordinary
+allocated native IPv6 and existing IPv4 targets retain the same allow-lists.
 
 The default policy is deliberately narrow:
 
@@ -44,6 +54,9 @@ That default works with targets such as `zj-cm-v4.ip.zstaticcdn.com:80` while bl
 | CPU / RAM / disk / traffic monitoring | enabled |
 | Optional vnStat traffic accounting | enabled, fixed local `vnstat --json` read |
 | Successful SSH login notification | enabled, read-only log tail |
+| Failed SSH login detection | optional, threshold and cooldown |
+| Panel firewall action queue | fixed ban/unban of one validated IP; enabled by installer |
+| Autonomous SSH guard bans | off unless explicitly enabled |
 | TCP latency task | enabled, allow-listed |
 | ICMP latency task | removed |
 | HTTP latency task | removed |
@@ -130,6 +143,16 @@ or executes SSH commands. Disable it with a systemd override setting
 
 The installer creates/updates the `komari-agent.service` service, makes a timestamped backup of an existing `/opt/komari/agent`, and uses the safety defaults above.
 
+The installer also enables outbound polling of the panel security-action queue.
+This queue supports only single-IP ban/unban operations in the fixed
+`inet komari_auth_guard` nftables table. Its drop rule targets TCP port 22.
+Local IP/CIDR whitelist entries protect against queued bans.
+`--disable-security-action-sync` disables the queue when installing; autonomous
+SSH guard bans remain off unless explicitly enabled. A queue acknowledgement
+reports the fixed action result; this is separate from the `agent.ping` capability.
+The upgrade script enables queue polling and silent SSH failure detection while
+keeping autonomous bans disabled.
+
 ### Add another approved host or port
 
 For example, to allow only the zstatic domain plus Cloudflare `1.1.1.1:443`:
@@ -163,6 +186,10 @@ The patch is tied to one precise base revision. Update it only after reviewing u
 - `protocol/v2/jsonrpc.go`
 - `cmd/root.go`
 - `cmd/flags/flag.go`
+
+When updating the IPv6 prefix snapshot, review both IANA registries linked
+above and the boundary regression cases in the patch. Do not fetch policy
+changes automatically at agent startup.
 
 Run the local verifier before a release:
 

@@ -52,7 +52,7 @@ jobs:
             exit 1
           }
           gofmt -w cmd server
-          go test ./server ./cmd/flags
+          go test -race ./server ./cmd/flags ./protocol/v2
           go build ./...
 
       - name: Build Linux release binaries
