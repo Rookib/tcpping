@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO="${KOMARI_SAFE_REPO:-suckdrygod/tcpping}"
+REPO="${KOMARI_SAFE_REPO:-Rookib/tcpping}"
 INSTALL_DIR="${KOMARI_INSTALL_DIR:-/opt/komari}"
 service_name="${KOMARI_SERVICE_NAME:-komari-agent}"
 

@@ -82,7 +82,7 @@ SHA256SUMS
 Replace `REPO` if you use a different GitHub owner/repository name. The command never needs a GitHub token.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/suckdrygod/tcpping/main/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/Rookib/tcpping/main/install.sh | \
   sudo bash -s -- \
   -e https://agent.example.com \
   -t YOUR_NODE_TOKEN \
@@ -113,7 +113,7 @@ back automatically.
 ### Upgrade an existing installation without entering its token again
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/suckdrygod/tcpping/main/upgrade.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Rookib/tcpping/main/upgrade.sh | sudo bash
 ```
 
 The upgrade keeps the existing service arguments, including `--month-rotate`,

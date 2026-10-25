@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_URL='https://github.com/suckdrygod/tcpping.git'
+REPO_URL='https://github.com/Rookib/tcpping.git'
 
 git init
 git add .
